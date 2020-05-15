@@ -5,11 +5,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 )
 
 var (
 	recursiveFlag = flag.Bool("r", false, "recursive search: for directories")
+	numLine       = flag.Bool("n", false, "print line number if found")
 )
 
 type ScanResult struct {
@@ -18,20 +21,27 @@ type ScanResult struct {
 	line       string
 }
 
-func scanFile(fpath, pattern string) ([]string, error) {
+//type rE struct{
+//	result []ScanResult
+//	err    error
+//}
+
+func scanFile(fpath, pattern string) ([]ScanResult, error) {
 	f, err := os.Open(fpath)
+	ln := 0
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
 	scanner.Split(bufio.ScanLines)
-	result := make([]string, 0)
+	result := make([]ScanResult, 0)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.Contains(line, pattern) {
-			result = append(result, line)
+			result = append(result, ScanResult{fpath, ln, line})
 		}
+		ln++
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
@@ -49,18 +59,73 @@ func exit(format string, val ...interface{}) {
 	os.Exit(1)
 }
 
-func processFile(fpath string, pattern string) {
-	res, err := scanFile(fpath, pattern)
-	if err != nil {
-		exit("Error scanning %s: %s", fpath, err.Error())
-	}
-	for _, line := range res {
-		fmt.Println(line)
+func processFile(fpath string, pattern string) chan []ScanResult {
+	defer wg.Done()
+	var lg sync.WaitGroup
+	res := make(chan []ScanResult)
+	lg.Add(1)
+	go func() {
+		defer lg.Done()
+		result, err := scanFile(fpath, pattern)
+		if err != nil {
+			exit("Error scanning %s: %s", fpath, err.Error())
+		}
+		res <- result
+	}()
+	go func() {
+		lg.Wait()
+		close(res)
+	}()
+	return res
+	//res, err := scanFile(fpath, pattern)
+
+}
+func Printout(res chan []ScanResult) {
+	defer wg.Done()
+	numLine := *numLine
+	for lines := range res {
+		for _, line := range lines {
+			if !numLine {
+				fmt.Println(line.file, ":", line.line)
+			} else {
+				fmt.Println(line.file, ":", line.lineNumber, ":", line.line)
+			}
+		}
 	}
 }
 
-func processDirectory(dir string, pattern string) {
+type FileError struct {
+	filename string
+	err      error
+}
 
+func (fe FileError) Error() string {
+	return fe.filename + ":" + fe.err.Error()
+}
+
+var wg sync.WaitGroup
+
+func processDirectory(dir string, pattern string) {
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+
+		if err != nil {
+			fmt.Println("Error:", err, "Path: ", path)
+			return err
+		}
+		if !info.IsDir() {
+			wg.Add(2)
+			go Printout(processFile(path, pattern))
+		}
+		return nil
+	})
+	if err != nil {
+		fError, ok := err.(FileError)
+		if ok {
+			fmt.Println(fError.filename, ":error:", fError.err)
+		} else {
+			panic(err)
+		}
+	}
 }
 
 func main() {
@@ -88,4 +153,5 @@ func main() {
 	} else {
 		processFile(path, pattern)
 	}
+	wg.Wait()
 }
